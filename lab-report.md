@@ -432,3 +432,9 @@ gef➤  si
 验证：
 
 ![Canary](./images/8.png)
+
+### 如何阻止这类攻击？
+
+将 len 放在 expression 的低地址一侧，例如按低地址到高地址排列为 len、logMsg、expression、pad。`gets` 从 expression 起向高地址写入，无法再通过此次连续溢出修改低地址处的 len
+
+
